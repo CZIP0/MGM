@@ -126,7 +126,7 @@ for lidar_data, (robot_x, robot_y) in zip(all_lidar_data, robot_positions):
         if 0 <= end_x < SIZE and 0 <= end_y < SIZE:
             occupancy_map[end_x][end_y] = 1
 
-# Ensure robot positions are marked as free in the occupancy map
+# A robot pozíciója mindig szabad helyként legyen felfogva
 for robot_x, robot_y in robot_positions:
     occupancy_map[robot_x][robot_y] = 0
 
