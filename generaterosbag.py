@@ -11,7 +11,7 @@ from time import time
 
 # Méretek
 SIZE = 20
-CM_PER_GRID_UNIT = 100  # 1 grid unit = 100 cm
+CM_PER_GRID_UNIT = 100  # 1 grid = 100 cm
 
 # Négyzetrács inicializálása
 grid = np.zeros((SIZE, SIZE))
@@ -51,9 +51,9 @@ def map_environment(grid, robot_x, robot_y):
     lidar_data.header = Header(stamp=rospy.Time.from_sec(time()), frame_id="lidar_frame")
     lidar_data.angle_min = 0.0
     lidar_data.angle_max = 2 * np.pi
-    lidar_data.angle_increment = np.pi / 180  # 1 degree in radians
+    lidar_data.angle_increment = np.pi / 180  # 1 fok radiánban
     lidar_data.range_min = 0.0
-    lidar_data.range_max = float(SIZE)  # Maximum range in meters
+    lidar_data.range_max = float(SIZE)  # Lidar sugár max (méterben)
     lidar_data.ranges = []
 
     for angle in range(360):
@@ -66,10 +66,10 @@ def map_environment(grid, robot_x, robot_y):
             if 0 <= grid_x < SIZE and 0 <= grid_y < SIZE:
                 if grid[grid_x][grid_y] == 1:
                     break
-                distance += 0.01  # Increment by 1 cm
+                distance += 0.01  # Centiméterenkénti növelés
             else:
                 break
-        lidar_data.ranges.append(distance)  # Export in meters
+        lidar_data.ranges.append(distance)  # Méterben adjuk tovább
     return lidar_data 
 
 # ROS node inicializálása
@@ -103,7 +103,7 @@ print(f"Odometry: {odom_msg}")
 for angle, distance in enumerate(lidar_data.ranges):
     print(f"Szög: {angle}°, Távolság: {distance:.2f} méter")
 
-    # Rajzolás
+# Rajzolás
 def plot_grid(grid, robot_x, robot_y):
     plt.imshow(grid, cmap='gray_r')
     plt.scatter(robot_y, robot_x, color='green', s=100)  # Robot jelölése
