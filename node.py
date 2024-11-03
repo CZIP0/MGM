@@ -2,18 +2,19 @@
 
 import rospy
 import numpy as np
-import matplotlib.pyplot as plt
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry
-from math import cos, sin
+from nav_msgs.msg import Odometry, OccupancyGrid, MapMetaData
+from std_msgs.msg import Header
+from geometry_msgs.msg import PoseStamped, Point
+from math import cos, sin, sqrt
+import message_filters
+import tf2_ros
+import tf2_geometry_msgs
 
 # Grid map inicializálása
-GRID_SIZE = 20
-GRID_RESOLUTION = 1  # 1 méter per cella
+GRID_SIZE = 100  # Példa méret (szabadon változtatható)
+GRID_RESOLUTION = 0.01 
 grid = np.zeros((GRID_SIZE, GRID_SIZE), dtype=int)
-
-# Robot pozíció és orientáció inicializálása
-robot_x, robot_y = GRID_SIZE // 2, GRID_SIZE // 2  # Kezdeti pozíció a rács közepén
 
 def bresenham(x0, y0, x1, y1):
     """Bresenham vonal rajzoló algoritmus."""
@@ -38,58 +39,113 @@ def bresenham(x0, y0, x1, y1):
 
     return points
 
-def lidar_callback(scan_data):
-    global grid, robot_x, robot_y
-    angle_min = scan_data.angle_min
-    angle_increment = scan_data.angle_increment
+class LidarGridMapper:
+    def __init__(self):
+        rospy.init_node('lidar_grid_mapper', anonymous=True)
 
-    for i, distance in enumerate(scan_data.ranges):
-        if distance > 0:  # Csak érvényes mérések
+        # TF2 buffer és listener inicializálása
+        self.tfBuffer = tf2_ros.Buffer()
+        self.listener = tf2_ros.TransformListener(self.tfBuffer)
+
+        # Feliratkozás az odometriai és LiDAR topikokra a message_filters segítségével
+        lidar_sub = message_filters.Subscriber("/scan", LaserScan)
+        odom_sub = message_filters.Subscriber("/odom", Odometry)
+        ts = message_filters.ApproximateTimeSynchronizer([lidar_sub, odom_sub], queue_size=10, slop=0.1)
+        ts.registerCallback(self.callback)
+
+        # Grid map publikáló RVIZ számára
+        self.grid_publisher = rospy.Publisher("/grid_map", OccupancyGrid, queue_size=10)
+        self.position_publisher = rospy.Publisher("/robot_position", Point, queue_size=10)
+
+        rospy.spin()
+
+    def callback(self, lidar_data, odom_data):
+        global grid
+
+        # Transformáció lekérése a TF2 bufferből
+        try:
+            transform = self.tfBuffer.lookup_transform("map", lidar_data.header.frame_id, rospy.Time(0), rospy.Duration(1.0))
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+            rospy.logwarn(f"Transform error: {e}")
+            return
+
+        # A robot pozíciójának transzformációja a globális koordinátarendszerbe
+        robot_position = self.transform_to_global(odom_data.pose.pose.position, transform)
+        robot_x = int(robot_position[0] / GRID_RESOLUTION) + GRID_SIZE // 2
+        robot_y = int(robot_position[1] / GRID_RESOLUTION) + GRID_SIZE // 2
+
+        # LiDAR adatainak feldolgozása
+        angle_min = lidar_data.angle_min
+        angle_increment = lidar_data.angle_increment
+
+        for i, distance in enumerate(lidar_data.ranges):
+            if distance < lidar_data.range_min or distance > lidar_data.range_max:
+                continue  # Skip invalid measurements
+
             angle = angle_min + i * angle_increment
-            
-            # A LiDAR mérések alapján célpont koordináták meghatározása a robot pozíciójához képest
-            x_end = robot_x + int((distance * cos(angle)) / GRID_RESOLUTION)
-            y_end = robot_y + int((distance * sin(angle)) / GRID_RESOLUTION)
+            x = distance * cos(angle)
+            y = distance * sin(angle)
 
-            # Bresenham algoritmus használata az aktuális pozíciótól a célpontig
+            # Lokális pont transzformálása globális koordinátarendszerbe
+            local_point = PoseStamped()
+            local_point.header = lidar_data.header
+            local_point.pose.position.x = x
+            local_point.pose.position.y = y
+            local_point.pose.position.z = 0
+            local_point.pose.orientation.w = 1.0
+
+            transformed_point = tf2_geometry_msgs.do_transform_pose(local_point, transform)
+            x_end = int(transformed_point.pose.position.x / GRID_RESOLUTION) + GRID_SIZE // 2
+            y_end = int(transformed_point.pose.position.y / GRID_RESOLUTION) + GRID_SIZE // 2
+
+            # Bresenham algoritmus használata az akadályig vezető vonal megrajzolásához
             points = bresenham(robot_x, robot_y, x_end, y_end)
             for j, (x, y) in enumerate(points):
-                x = int(x)
-                y = int(y)
                 if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
                     if j < len(points) - 1:
-                        grid[x][y] = 0   # 0 a vonalon, 1 a célpontban
+                        grid[x][y] = 0  # Szabad terület
                     else:
-                        grid[x][y]= 1
+                        grid[x][y] = 1  # Akadály
 
-    # Grid megjelenítése
-    plt.imshow(grid, cmap='gray_r')
-    plt.scatter(robot_y, robot_x, color='red', s=100, label="Robot Position")  # Robot pozíció piros ponttal
-    plt.title("20x20 Grid Map")
-    plt.pause(0.05)
-    plt.clf()
+        # OccupancyGrid üzenet létrehozása és küldése RVIZ-be
+        self.publish_occupancy_grid()
 
-def odometry_callback(odom_data):
-    global robot_x, robot_y
-    # Robot pozíciójának kiolvasása és rács pozícióra konvertálása
-    position = odom_data.pose.pose.position
-    # robot_x = int(position.x / GRID_RESOLUTION) + GRID_SIZE // 2
-    robot_x = position.x
-    # robot_y = int(position.y / GRID_RESOLUTION) + GRID_SIZE // 2
-    robot_y = position.y
+        # Robot pozíciójának küldése
+        robot_position_msg = Point()
+        robot_position_msg.x = robot_position[0]
+        robot_position_msg.y = robot_position[1]
+        robot_position_msg.z = 0
+        self.position_publisher.publish(robot_position_msg)
 
-def main():
-    rospy.init_node('lidar_grid_mapper', anonymous=True)
+    def transform_to_global(self, position, transform):
+        """Pozíció transzformálása a globális koordinátarendszerbe."""
+        point = PoseStamped()
+        point.header.frame_id = "map"
+        point.pose.position = position
+        point.pose.orientation.w = 1.0
 
-    # Feliratkozás az odometriai és LiDAR topikokra
-    rospy.Subscriber("/robot_odom", Odometry, odometry_callback)
-    rospy.Subscriber("/lidar_data", LaserScan, lidar_callback)
+        global_point = tf2_geometry_msgs.do_transform_pose(point, transform)
+        return (global_point.pose.position.x, global_point.pose.position.y)
 
-    # Megjelenítési beállítások
-    plt.ion()
-    plt.figure(figsize=(5, 5))
+    def publish_occupancy_grid(self):
+        global grid
+        occupancy_grid = OccupancyGrid()
+        occupancy_grid.header = Header()
+        occupancy_grid.header.stamp = rospy.Time.now()
+        occupancy_grid.header.frame_id = "map"
 
-    rospy.spin()
+        # Map metaadatok beállítása
+        occupancy_grid.info = MapMetaData()
+        occupancy_grid.info.resolution = GRID_RESOLUTION
+        occupancy_grid.info.width = GRID_SIZE
+        occupancy_grid.info.height = GRID_SIZE
+        occupancy_grid.info.origin.position.x = -GRID_SIZE // 2 * GRID_RESOLUTION
+        occupancy_grid.info.origin.position.y = -GRID_SIZE // 2 * GRID_RESOLUTION
+        occupancy_grid.info.origin.position.z = 0
+
+        # Adatok beállítása (0-100 közötti értékek)
+        occupancy_grid.data = (grid.flatten() * 100).astype(int).tolist()
+        self.grid_publisher.publish(occupancy_grid)
 
 if __name__ == "__main__":
-    main()
+    LidarGridMapper()
