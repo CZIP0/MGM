@@ -23,9 +23,9 @@ class TurtleBot3DataProcessor:
         self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
     def process_data(self):
-        for topic, msg, t in self.input_bag.read_messages(topics=['/odom', '/scan']):
+        for topic, msg_odom, msg in self.input_bag.read_messages(topics=['/odom', '/scan']):
             if topic == '/odom':
-                self.process_odom(msg)
+                self.process_odom(msg_odom)
             elif topic == '/scan':
                 self.process_scan(msg)
 
@@ -35,7 +35,7 @@ class TurtleBot3DataProcessor:
 
     def process_odom(self, msg):
         # Odometry adat mentése az új rosbag fájlba
-        self.output_bag.write('robot_odom', msg)
+        self.output_bag.write('robot_odom', msg_odom)
 
     def process_scan(self, msg):
         # LaserScan adat transzformálása globális koordináta rendszerbe
