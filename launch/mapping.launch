@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+
+<launch>
+    <arg name="rviz_file" default="$(find hf)/rviz/test.rviz"/>
+	
+
+	<param name="/use_sim_time" value="false"/>
+
+
+    <!-- 1. Bag lejátszás -->
+    <node pkg="rosbag" type="play" name="playback" args="--clock $(find hf)/bag/without_map.bag" output="screen"/>
+
+    <!-- 2. Map Server indítása a térképpel -->
+    <node name="map_server" pkg="map_server" type="map_server" args="$(find turtlebot3_navigation)/maps/map.yaml" output="screen" />
+
+    <!-- 3. AMCL indítása -->
+    <include file="$(find turtlebot3_navigation)/launch/amcl.launch" />
+
+    <!-- 4. RViz indítása -->
+    <node pkg="rviz" type="rviz" name="rviz" args="-d $(arg rviz_file)"/>
+
+     <!-- 5. Egyéni node indítása a hf csomagból -->
+    <node pkg="hf" type="node.py" name="mapping" output="screen"/>
+</launch>
