@@ -3,7 +3,7 @@
 import rospy
 import numpy as np
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid, MapMetaData
+from nav_msgs.msg import OccupancyGrid, MapMetaData, Odometry
 from std_msgs.msg import Header
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from math import cos, sin
@@ -12,7 +12,7 @@ import tf2_ros
 import tf2_geometry_msgs
 
 # Grid map inicializálása
-GRID_SIZE = 1000  # Példa méret (szabadon változtatható)
+GRID_SIZE = 300  # Példa méret (szabadon változtatható)
 GRID_RESOLUTION = 0.02
 grid = np.full((GRID_SIZE, GRID_SIZE), 0.5)
 
@@ -50,7 +50,8 @@ class LidarGridMapper:
         # Feliratkozás az AMCL pozícióra és LiDAR topikokra a message_filters segítségével
         lidar_sub = message_filters.Subscriber("/scan", LaserScan)
         amcl_sub = message_filters.Subscriber("/amcl_pose", PoseWithCovarianceStamped)
-        ts = message_filters.ApproximateTimeSynchronizer([lidar_sub, amcl_sub], queue_size=100, slop=0.1)
+        odom_sub = message_filters.Subscriber("/odom", Odometry)
+        ts = message_filters.ApproximateTimeSynchronizer([lidar_sub, odom_sub], queue_size=100, slop=0.1)
         ts.registerCallback(self.callback)
 
         # Grid map publikáló RVIZ számára
@@ -59,20 +60,30 @@ class LidarGridMapper:
 
         rospy.spin()
 
-    def callback(self, lidar_data, amcl_data):
+    def callback(self, lidar_data, odom_data):
         global grid
 
         # Transformáció lekérése a TF2 bufferből
         try:
-            transform = self.tfBuffer.lookup_transform("map", lidar_data.header.frame_id, lidar_data.header.stamp, rospy.Duration(1.0))
+            transform_lidar = self.tfBuffer.lookup_transform("map", lidar_data.header.frame_id, lidar_data.header.stamp, rospy.Duration(0.05))
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
+            rospy.logwarn(f"Transform error: {e}")
+            return
+        
+        try:
+            transform_pos = self.tfBuffer.lookup_transform("map", odom_data.header.frame_id, odom_data.header.stamp, rospy.Duration(0.05))
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
             rospy.logwarn(f"Transform error: {e}")
             return
 
         # A robot pozíciójának transzformációja a globális koordinátarendszerbe
-        robot_position = self.transform_to_global(amcl_data.pose.pose.position, transform)
-        robot_x = int(robot_position[0] / GRID_RESOLUTION) + GRID_SIZE // 2
-        robot_y = int(robot_position[1] / GRID_RESOLUTION) + GRID_SIZE // 2
+        odom_pose = PoseStamped()
+        odom_pose.header = odom_data.header
+        odom_pose.pose = odom_data.pose.pose
+        robot_position = tf2_geometry_msgs.do_transform_pose(odom_pose, transform_pos)
+
+        robot_x = int(robot_position.pose.position.x / GRID_RESOLUTION) + GRID_SIZE // 2
+        robot_y = int(robot_position.pose.position.y / GRID_RESOLUTION) + GRID_SIZE // 2
 
         # LiDAR adatainak feldolgozása
         angle_min = lidar_data.angle_min
@@ -93,13 +104,13 @@ class LidarGridMapper:
             local_point.pose.position.y = y
             local_point.pose.orientation.w = 1.0
 
-            transformed_point = tf2_geometry_msgs.do_transform_pose(local_point, transform)
+            transformed_point = tf2_geometry_msgs.do_transform_pose(local_point, transform_lidar)
             x_end = int(transformed_point.pose.position.x / GRID_RESOLUTION) + GRID_SIZE // 2
             y_end = int(transformed_point.pose.position.y / GRID_RESOLUTION) + GRID_SIZE // 2
 
             # Bresenham algoritmus használata az akadályig vezető vonal megrajzolásához
             points = bresenham(robot_x, robot_y, x_end, y_end)
-            for j, (x, y) in enumerate(points):
+            for j, (y, x) in enumerate(points):         # (y, x) (x, y) helyett mert a grid a sorokat y-ként az oszlopokat x-ként értelmezi...
                 if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
                     if j < len(points) - 1:
                         if grid[x][y] == 1:
@@ -116,22 +127,12 @@ class LidarGridMapper:
         current_state = PoseStamped()
         current_state.header.frame_id = "map"
         current_state.header.stamp = rospy.Time.now()
-        current_state.pose.position.x = amcl_data.pose.pose.position.x
-        current_state.pose.position.y = amcl_data.pose.pose.position.y
-        current_state.pose.orientation.w = 1.0
+        current_state.pose.position.x = robot_position.pose.position.x
+        current_state.pose.position.y = robot_position.pose.position.y
+        current_state.pose.orientation = robot_position.pose.orientation
 
         self.position_publisher.publish(current_state)
 
-    def transform_to_global(self, position, transform):
-        """Pozíció transzformálása a globális koordinátarendszerbe."""
-        point = PoseStamped()
-        point.header.frame_id = "map"
-        point.pose.position.x = position.x
-        point.pose.position.y = position.y
-        point.pose.orientation.w = 1.0
-
-        global_point = tf2_geometry_msgs.do_transform_pose(point, transform)
-        return (global_point.pose.position.x, global_point.pose.position.y)
 
     def publish_occupancy_grid(self):
         global grid
