@@ -1,0 +1,29 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/workspace/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/workspace/src/hamster_simulation/gazebo_ackermann_drive_plugin/include/**",
+        "/workspace/src/pkg3/include/**",
+        "/workspace/src/pkg4/include/**",
+        "/workspace/src/pkg6/include/**",
+        "/workspace/src/pkg7/include/**",
+        "/workspace/src/turtlebot3_simulations/turtlebot3_fake/include/**",
+        "/workspace/src/turtlebot3_simulations/turtlebot3_gazebo/include/**",
+        "/workspace/src/turtlebot3/turtlebot3_slam/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}

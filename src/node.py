@@ -14,7 +14,7 @@ import tf2_geometry_msgs
 # Grid map inicializálása
 GRID_SIZE = 300  # Példa méret (szabadon változtatható)
 GRID_RESOLUTION = 0.02
-grid = np.full((GRID_SIZE, GRID_SIZE), 0.5)
+grid = np.zeros((GRID_SIZE, GRID_SIZE))  # Kezdeti log odds értékek (0), ami 50%-os esélyt jelent
 
 def bresenham(x0, y0, x1, y1):
     """Bresenham vonal rajzoló algoritmus."""
@@ -63,7 +63,7 @@ class LidarGridMapper:
     def callback(self, lidar_data, odom_data):
         global grid
 
-        # Transformáció lekérése a TF2 bufferből
+        # Transformáció lekérése
         try:
             transform_lidar = self.tfBuffer.lookup_transform("map", lidar_data.header.frame_id, lidar_data.header.stamp, rospy.Duration(0.05))
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
@@ -89,9 +89,15 @@ class LidarGridMapper:
         angle_min = lidar_data.angle_min
         angle_increment = lidar_data.angle_increment
 
+        # Inverse Sensor Model paraméterei
+        log_odds_hit = 0.1  # Akadály frissítés (log odds)
+        log_odds_miss = -0.1  # Szabad terület frissítés (log odds)
+        max_range = lidar_data.range_max
+        min_range = lidar_data.range_min
+
         for i, distance in enumerate(lidar_data.ranges):
-            if distance < lidar_data.range_min or distance > lidar_data.range_max:
-                continue  # Skip invalid measurements
+            if distance < min_range or distance > max_range:
+                continue  # Invalid érték esetén tovább lépünk
 
             angle = angle_min + i * angle_increment
             x = distance * cos(angle)
@@ -110,29 +116,18 @@ class LidarGridMapper:
 
             # Bresenham algoritmus használata az akadályig vezető vonal megrajzolásához
             points = bresenham(robot_x, robot_y, x_end, y_end)
-            for j, (y, x) in enumerate(points):         # (y, x) (x, y) helyett mert a grid a sorokat y-ként az oszlopokat x-ként értelmezi...
+
+            # Inverse Sensor Model alkalmazása
+            for j, (y, x) in enumerate(points):  
                 if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
-                    if j < len(points) - 1:
-                        if grid[x][y] == 1:
-                            continue
-                        else:
-                            grid[x][y] = 0  # Szabad terület
-                    else:
-                        grid[x][y] = 1  # Akadály
+                    if j < len(points) - 1:  # Szabad terület
+                        grid[x][y] += log_odds_miss
+                    else:  # Akadály
+                        grid[x][y] += log_odds_hit
 
-        # OccupancyGrid üzenet létrehozása és küldése RVIZ-be
+        # Publikálás és pozíciók küldése
         self.publish_occupancy_grid()
-
-        # Robot pozíciójának küldése
-        current_state = PoseStamped()
-        current_state.header.frame_id = "map"
-        current_state.header.stamp = rospy.Time.now()
-        current_state.pose.position.x = robot_position.pose.position.x
-        current_state.pose.position.y = robot_position.pose.position.y
-        current_state.pose.orientation = robot_position.pose.orientation
-
-        self.position_publisher.publish(current_state)
-
+        self.publish_robot_position(robot_position)
 
     def publish_occupancy_grid(self):
         global grid
@@ -150,9 +145,23 @@ class LidarGridMapper:
         occupancy_grid.info.origin.position.y = -GRID_SIZE // 2 * GRID_RESOLUTION
         occupancy_grid.info.origin.position.z = 0
 
-        # Adatok beállítása (0-100 közötti értékek)
-        occupancy_grid.data = (grid.flatten() * 100).astype(int).tolist()
+        # Adatok beállítása (0-100 közötti értékek log odds-ból konvertálva)
+        occupancy_grid.data = [int(self.log_odds_to_probability(grid[i, j]) * 100) for i in range(GRID_SIZE) for j in range(GRID_SIZE)]
         self.grid_publisher.publish(occupancy_grid)
+
+    def log_odds_to_probability(self, log_odds):
+        """Log odds átváltása valószínűségre."""
+        return 1.0 / (1.0 + np.exp(-log_odds))
+
+    def publish_robot_position(self, robot_position):
+        current_state = PoseStamped()
+        current_state.header.frame_id = "map"
+        current_state.header.stamp = rospy.Time.now()
+        current_state.pose.position.x = robot_position.pose.position.x
+        current_state.pose.position.y = robot_position.pose.position.y
+        current_state.pose.orientation = robot_position.pose.orientation
+
+        self.position_publisher.publish(current_state)
 
 if __name__ == "__main__":
     LidarGridMapper()
