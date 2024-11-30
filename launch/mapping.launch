@@ -8,13 +8,13 @@
 
 
     <!-- 1. Bag lejátszás -->
-    <node pkg="rosbag" type="play" name="playback" args="--clock $(find hf)/bag/without_map.bag" output="screen"/>
+    <node pkg="rosbag" type="play" name="playback" args="--clock $(find hf)/bag/noise.bag" output="screen"/>
 
     <!-- 2. Map Server indítása a térképpel -->
-    <node name="map_server" pkg="map_server" type="map_server" args="$(find turtlebot3_navigation)/maps/map.yaml" output="screen" />
+    <!-- <node name="map_server" pkg="map_server" type="map_server" args="$(find turtlebot3_navigation)/maps/map.yaml" output="screen" /> -->
 
     <!-- 3. AMCL indítása -->
-    <include file="$(find turtlebot3_navigation)/launch/amcl.launch" />
+    <!--<include file="$(find turtlebot3_navigation)/launch/amcl.launch" /> -->
 
     <!-- 4. RViz indítása -->
     <node pkg="rviz" type="rviz" name="rviz" args="-d $(arg rviz_file)"/>
