@@ -12,9 +12,9 @@ import tf2_ros
 import tf2_geometry_msgs
 
 # Grid map inicializálása
-GRID_SIZE = 300  # Példa méret (szabadon változtatható)
-GRID_RESOLUTION = 0.02
-grid = np.full((GRID_SIZE, GRID_SIZE), 0.5)
+GRID_SIZE = 200  # Példa méret (szabadon változtatható)
+GRID_RESOLUTION = 0.03
+grid = np.zeros((GRID_SIZE, GRID_SIZE))  # Kezdeti log odds értékek (0), ami 50%-os esélyt jelent
 
 def bresenham(x0, y0, x1, y1):
     """Bresenham vonal rajzoló algoritmus."""
@@ -45,13 +45,17 @@ class LidarGridMapper:
 
         # TF2 buffer és listener inicializálása
         self.tfBuffer = tf2_ros.Buffer()
+        # self.tfBuffer = tf2_ros.Buffer(cache_time=rospy.Duration(0.2))  # 200 ms cache idő
+
         self.listener = tf2_ros.TransformListener(self.tfBuffer)
 
         # Feliratkozás az AMCL pozícióra és LiDAR topikokra a message_filters segítségével
         lidar_sub = message_filters.Subscriber("/scan", LaserScan)
         amcl_sub = message_filters.Subscriber("/amcl_pose", PoseWithCovarianceStamped)
         odom_sub = message_filters.Subscriber("/odom", Odometry)
-        ts = message_filters.ApproximateTimeSynchronizer([lidar_sub, odom_sub], queue_size=100, slop=0.1)
+        # ts = message_filters.ApproximateTimeSynchronizer([lidar_sub, odom_sub], queue_size=100, slop=0.1)
+        ts = message_filters.ApproximateTimeSynchronizer([lidar_sub, odom_sub], queue_size=100, slop=2)
+
         ts.registerCallback(self.callback)
 
         # Grid map publikáló RVIZ számára
@@ -63,15 +67,23 @@ class LidarGridMapper:
     def callback(self, lidar_data, odom_data):
         global grid
 
-        # Transformáció lekérése a TF2 bufferből
+        # Transformáció lekérése
         try:
-            transform_lidar = self.tfBuffer.lookup_transform("map", lidar_data.header.frame_id, lidar_data.header.stamp, rospy.Duration(0.05))
+            transform_lidar = self.tfBuffer.lookup_transform("map", lidar_data.header.frame_id, lidar_data.header.stamp, rospy.Duration(0.02))
+            # if transform_lidar is None:
+            #     transform_lidar = prev_transform_lidar
+            # else:
+            #     prev_transform_lidar = transform_lidar
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
             rospy.logwarn(f"Transform error: {e}")
             return
         
         try:
-            transform_pos = self.tfBuffer.lookup_transform("map", odom_data.header.frame_id, odom_data.header.stamp, rospy.Duration(0.05))
+            transform_pos = self.tfBuffer.lookup_transform("map", odom_data.header.frame_id, odom_data.header.stamp, rospy.Duration(0.02))
+            # if transform_pos is None:
+            #     transform_pos = prev_transform_pos
+            # else:
+            #     prev_transform_pos = transform_pos
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException) as e:
             rospy.logwarn(f"Transform error: {e}")
             return
@@ -89,11 +101,18 @@ class LidarGridMapper:
         angle_min = lidar_data.angle_min
         angle_increment = lidar_data.angle_increment
 
-        for i, distance in enumerate(lidar_data.ranges):
-            if distance < lidar_data.range_min or distance > lidar_data.range_max:
+        # Inverse Sensor Model paraméterei - Új részek kezdete
+        log_odds_hit = 0.85  # Akadály frissítés (log odds)
+        log_odds_miss = -0.7  # Szabad terület frissítés (log odds)
+        max_range = lidar_data.range_max
+        min_range = lidar_data.range_min
+        # Inverse Sensor Model paraméterei - Új részek vége
+
+        for i, distance in enumerate(lidar_data.ranges[::2]):
+            if distance < min_range or distance > max_range:
                 continue  # Skip invalid measurements
 
-            angle = angle_min + i * angle_increment
+            angle = angle_min + i * angle_increment * 2
             x = distance * cos(angle)
             y = distance * sin(angle)
 
@@ -110,29 +129,23 @@ class LidarGridMapper:
 
             # Bresenham algoritmus használata az akadályig vezető vonal megrajzolásához
             points = bresenham(robot_x, robot_y, x_end, y_end)
-            for j, (y, x) in enumerate(points):         # (y, x) (x, y) helyett mert a grid a sorokat y-ként az oszlopokat x-ként értelmezi...
+
+            # Inverse Sensor Model alkalmazása - Új részek kezdete
+            for j, (y, x) in enumerate(points):  
                 if 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE:
-                    if j < len(points) - 1:
-                        if grid[x][y] == 1:
+                    if j < len(points) - 1:  # Szabad terület
+                        if grid[x][y] > 0:
+                            # grid[x][y] = 10
                             continue
                         else:
-                            grid[x][y] = 0  # Szabad terület
-                    else:
-                        grid[x][y] = 1  # Akadály
+                            grid[x][y] += log_odds_miss
+                    else:  # Akadály
+                        grid[x][y] += log_odds_hit
+            # Inverse Sensor Model alkalmazása - Új részek vége
 
-        # OccupancyGrid üzenet létrehozása és küldése RVIZ-be
+        # Publikálás és pozíciók küldése
         self.publish_occupancy_grid()
-
-        # Robot pozíciójának küldése
-        current_state = PoseStamped()
-        current_state.header.frame_id = "map"
-        current_state.header.stamp = rospy.Time.now()
-        current_state.pose.position.x = robot_position.pose.position.x
-        current_state.pose.position.y = robot_position.pose.position.y
-        current_state.pose.orientation = robot_position.pose.orientation
-
-        self.position_publisher.publish(current_state)
-
+        self.publish_robot_position(robot_position)
 
     def publish_occupancy_grid(self):
         global grid
@@ -150,9 +163,23 @@ class LidarGridMapper:
         occupancy_grid.info.origin.position.y = -GRID_SIZE // 2 * GRID_RESOLUTION
         occupancy_grid.info.origin.position.z = 0
 
-        # Adatok beállítása (0-100 közötti értékek)
-        occupancy_grid.data = (grid.flatten() * 100).astype(int).tolist()
+        # Adatok beállítása (0-100 közötti értékek log odds-ból konvertálva)
+        occupancy_grid.data = [int(self.log_odds_to_probability(grid[i, j]) * 100) for i in range(GRID_SIZE) for j in range(GRID_SIZE)]
         self.grid_publisher.publish(occupancy_grid)
+
+    def log_odds_to_probability(self, log_odds):
+        """Log odds átváltása valószínűségre."""
+        return 1.0 / (1.0 + np.exp(-log_odds))
+
+    def publish_robot_position(self, robot_position):
+        current_state = PoseStamped()
+        current_state.header.frame_id = "map"
+        current_state.header.stamp = rospy.Time.now()
+        current_state.pose.position.x = robot_position.pose.position.x
+        current_state.pose.position.y = robot_position.pose.position.y
+        current_state.pose.orientation = robot_position.pose.orientation
+
+        self.position_publisher.publish(current_state)
 
 if __name__ == "__main__":
     LidarGridMapper()
